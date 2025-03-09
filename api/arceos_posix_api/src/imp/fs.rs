@@ -8,7 +8,7 @@ use axio::{PollState, SeekFrom};
 use axsync::Mutex;
 
 use super::fd_ops::{FileLike, get_file_like};
-use crate::AT_FDCWD;
+use crate::{handle_file_path, AT_FDCWD};
 use crate::{ctypes, utils::char_ptr_to_str};
 
 /// File wrapper for `axfs::fops::File`.
@@ -155,37 +155,39 @@ pub fn sys_openat(
     flags: c_int,
     mode: ctypes::mode_t,
 ) -> c_int {
-    let filename = match char_ptr_to_str(filename) {
-        Ok(s) => s,
-        Err(_) => return -1,
-    };
+    // let filename = match char_ptr_to_str(filename) {
+    //     Ok(s) => s,
+    //     Err(_) => return -1,
+    // };
 
     debug!(
         "sys_openat <= {} {:?} {:#o} {:#o}",
         dirfd, filename, flags, mode
     );
+    
+    syscall_body!(sys_openat, {
+        let binding = handle_file_path(dirfd as _, Some(filename as _), false)?;
+        let filename = binding.as_str();
 
-    let options = flags_to_options(flags, mode);
+        debug!(
+            "handled filename : {:?}",
+            filename
+        );
 
-    if filename.starts_with('/') || dirfd == AT_FDCWD as _ {
-        return sys_open(filename.as_ptr() as _, flags, mode);
-    }
-
-    match Directory::from_fd(dirfd).and_then(|dir| {
+        let options = flags_to_options(flags, mode);
+        if options.has_directory() {
+            return Directory::from_path(filename.into(), &options)
+                .and_then(Directory::add_to_fd_table);
+        }
         add_file_or_directory_fd(
-            |filename, options| dir.inner.lock().open_file_at(filename, options),
-            |filename, options| dir.inner.lock().open_dir_at(filename, options),
+            axfs::fops::File::open,
+            axfs::fops::Directory::open_dir,
             filename,
             &options,
         )
-    }) {
-        Ok(fd) => fd,
-        Err(e) => {
-            debug!("sys_openat => {}", e);
-            -1
-        }
-    }
+    })
 }
+
 
 /// Use the function to open file or directory, then add into file descriptor table.
 /// First try opening files, if fails, try directory.
